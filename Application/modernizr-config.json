@@ -1,0 +1,30 @@
+{
+  "classPrefix": "",
+  "options": [
+    "addTest",
+    "atRule",
+    "domPrefixes",
+    "hasEvent",
+    "html5shiv",
+    "html5printshiv",
+    "load",
+    "mq",
+    "prefixed",
+    "prefixes",
+    "prefixedCSS",
+    "setClasses",
+    "testAllProps",
+    "testProp",
+    "testStyles"
+  ],
+  "feature-detects": [
+    "input",
+    "input/formaction",
+    "input/formenctype",
+    "input/formmethod",
+    "input/formtarget",
+    "inputsearchevent",
+    "inputtypes",
+    "history"
+  ]
+}

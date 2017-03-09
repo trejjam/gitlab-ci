@@ -1,0 +1,141 @@
+stages:
+  - codeStyle
+  - prepareRuntime
+  - build
+  - dockerPack
+  - test
+  - deploy
+
+variables:
+  RUNTIME_CONTAINER: "runtime"
+  BUILD_CONTAINER: "build"
+  ARTIFACT_CONTAINER: "artifact"
+
+codeStyle:
+  stage: codeStyle
+  # this is only https://github.com/nette/code-checker in docker
+  image: "${CI_REGISTRY}/trejjam/code-checker:master"
+  script:
+    - php /var/www/code-checker.php -d Application/app --short-arrays -i config
+    - php /var/www/code-checker.php -d Application/www
+  tags:
+    - docker
+    - image
+  except:
+    - tags
+
+prepareRuntime:
+  stage: prepareRuntime
+  script:
+    - docker login -u gitlab-ci-token -p "${CI_BUILD_TOKEN}" "${CI_REGISTRY}"
+
+    - docker build --pull -t "${CI_REGISTRY_IMAGE}:${RUNTIME_CONTAINER}" .
+    - docker push "${CI_REGISTRY_IMAGE}:${RUNTIME_CONTAINER}"
+    - docker tag "${CI_REGISTRY_IMAGE}:${RUNTIME_CONTAINER}" "${CI_PROJECT_PATH}:${RUNTIME_CONTAINER}"
+    - docker rmi "${CI_REGISTRY_IMAGE}:${RUNTIME_CONTAINER}"
+
+    - docker build -t "${CI_REGISTRY_IMAGE}:${BUILD_CONTAINER}" --file "DockerfileBuild" .
+    - docker push "${CI_REGISTRY_IMAGE}:${BUILD_CONTAINER}"
+    - docker tag "${CI_REGISTRY_IMAGE}:${BUILD_CONTAINER}" "${CI_PROJECT_PATH}:${BUILD_CONTAINER}"
+    - docker rmi "${CI_REGISTRY_IMAGE}:${BUILD_CONTAINER}"
+
+    - docker logout "${CI_REGISTRY}"
+  tags:
+    - docker
+    - image
+  except:
+    - tags
+
+build:
+  stage: build
+  image: "${CI_REGISTRY_IMAGE}:${BUILD_CONTAINER}"
+  script:
+    - Scripts/linkCache.sh
+    - Scripts/addAccessKeys.sh
+    - cd Application/www && yarn run composer-install && cd ../...
+    - cd Application/www && yarn run linux-deploy && cd ../..
+    - Scripts/copyFiles.sh
+  tags:
+    - docker
+    - image
+    - may-upload
+  except:
+    - tags
+  only:
+    - master
+    - production
+  artifacts:
+    name: application
+    paths:
+      - Application/
+    expire_in: '30 days'
+
+pack:
+  stage: dockerPack
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - docker login -u gitlab-ci-token -p "${CI_BUILD_TOKEN}" "${CI_REGISTRY}"
+
+    - mv Application/* ./
+
+    - docker pull "${CI_REGISTRY_IMAGE}:${RUNTIME_CONTAINER}"
+    - docker tag "${CI_REGISTRY_IMAGE}:${RUNTIME_CONTAINER}" "${CI_PROJECT_PATH}:${RUNTIME_CONTAINER}"
+
+    - docker pull "${CI_REGISTRY_IMAGE}:${BUILD_CONTAINER}"
+    - docker tag "${CI_REGISTRY_IMAGE}:${BUILD_CONTAINER}" "${CI_PROJECT_PATH}:${BUILD_CONTAINER}"
+
+    - docker build -t "${CI_REGISTRY_IMAGE}:${ARTIFACT_CONTAINER}" .
+    - docker push "${CI_REGISTRY_IMAGE}:${ARTIFACT_CONTAINER}"
+    - docker tag "${CI_REGISTRY_IMAGE}:${ARTIFACT_CONTAINER}" "${CI_PROJECT_PATH}:${ARTIFACT_CONTAINER}"
+    - docker rmi "${CI_REGISTRY_IMAGE}:${ARTIFACT_CONTAINER}" "${CI_REGISTRY_IMAGE}:${BUILD_CONTAINER}" "${CI_REGISTRY_IMAGE}:${RUNTIME_CONTAINER}"
+    - docker rmi "${CI_PROJECT_PATH}:${BUILD_CONTAINER}" "${CI_PROJECT_PATH}:${RUNTIME_CONTAINER}"
+
+    - docker logout "${CI_REGISTRY}"
+  tags:
+    - docker
+    - image
+    - may-upload
+  only:
+    - master
+    - production
+  except:
+    - tags
+  artifacts:
+    name: nginxConfig
+    paths:
+      - nginx/
+    expire_in: '30 days'
+
+deploy:
+  stage: deploy
+  when: manual
+  variables:
+    GIT_STRATEGY: none
+  dependencies:
+    - pack
+  script:
+    - docker login -u gitlab-ci-token -p "${CI_BUILD_TOKEN}" "${CI_REGISTRY}"
+
+    - docker pull "${CI_REGISTRY_IMAGE}:${ARTIFACT_CONTAINER}"
+    - docker tag "${CI_REGISTRY_IMAGE}:${ARTIFACT_CONTAINER}" "${CI_PROJECT_PATH}:${ARTIFACT_CONTAINER}"
+    - docker tag "${CI_REGISTRY_IMAGE}:${ARTIFACT_CONTAINER}" "${CI_PROJECT_PATH}:active"
+    - docker rmi "${CI_REGISTRY_IMAGE}:${ARTIFACT_CONTAINER}" "${CI_PROJECT_PATH}:${ARTIFACT_CONTAINER}"
+
+    # dc-<project> is alias for docker-compose with per environment config
+    - dc-project stop php
+    - dc-project up -d php
+    # project_nginx_config is volume with nginx conf files
+    - docker run --rm -v "${CI_PROJECT_DIR}/nginx:/nginx/artifact" -v "project_nginx_config:/nginx/service" busybox:latest sh -c "rm -rf /nginx/service/* && mv /nginx/artifact/master/* /nginx/service/"
+    - dc-project exec -T nginx nginx -s reload
+
+    - docker logout "${CI_REGISTRY}"
+  tags:
+    - docker
+    - deploy
+    - staging
+  environment: staging
+  only:
+    - master
+  except:
+    - tags
